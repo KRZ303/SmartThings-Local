@@ -332,6 +332,22 @@ read_plaintext_ocf_resource(host, href, *, query=(), port=5683, timeout=3.0, ret
 
 Bounded discovery of a known host's plaintext OCF response port.
 
+#### `OcfResponder`
+
+```python
+OcfResponder(plaintext_port: int, rt: tuple[str, ...], di: str | None, name: str | None, secure_ports: tuple[int, ...], error_code: str | None = None)
+```
+
+*class*: One OCF responder at a host: its identity and advertised secure ports.
+
+#### `OcfResponderDiscovery`
+
+```python
+OcfResponderDiscovery(responders: tuple[OcfResponder, ...], error_code: str | None = None)
+```
+
+*class*: Redacted result of enumerating the OCF responders at one host.
+
 #### `OcfResponderPortDiscoveryResult`
 
 ```python
@@ -347,6 +363,30 @@ discover_ocf_responder_ports(target_address: str, *, interface_address: str, dis
 ```
 
 *function*: Find plaintext OCF response ports for one known IPv4 host.
+
+#### `discover_ocf_responders`
+
+```python
+discover_ocf_responders(target_address: str, *, interface_address: str, discovery_port: int = 5683, timeout: float = 3.0, rounds: int = 2, per_read_timeout: float = 3.0, retries: int = 1) -> OcfResponderDiscovery
+```
+
+*function*: Enumerate the OCF responders at one IPv4 host, with identity and ports.
+
+#### `read_ocf_responder`
+
+```python
+read_ocf_responder(host: str, port: int, *, timeout: float = 3.0, retries: int = 1) -> OcfResponder
+```
+
+*function*: Read one responder's identity and advertised secure ports at a known port.
+
+#### `secure_ports_for_di`
+
+```python
+secure_ports_for_di(responders: object, di: str) -> tuple[int, ...]
+```
+
+*function*: Return the advertised secure ports of the responder whose `di` matches.
 
 ### `smartthings_local.protocol.endpoint`
 

@@ -16,6 +16,8 @@ import socket
 import time
 from dataclasses import dataclass
 
+import cbor2
+
 from ..errors import MalformedMessageError
 from .coap import (
     ACCEPT,
@@ -29,10 +31,19 @@ from .coap import (
     build_coap,
     parse_coap,
 )
+from .ocf_discovery import (
+    discover_ocf_secure_ports,
+    read_plaintext_ocf_resource,
+)
 
 __all__ = [
+    "OcfResponder",
+    "OcfResponderDiscovery",
     "OcfResponderPortDiscoveryResult",
     "discover_ocf_responder_ports",
+    "discover_ocf_responders",
+    "read_ocf_responder",
+    "secure_ports_for_di",
 ]
 
 _OCF_MULTICAST_GROUP = socket.inet_ntoa(bytes((224, 0, 1, 187)))
@@ -65,6 +76,65 @@ class OcfResponderPortDiscoveryResult:
             "OcfResponderPortDiscoveryResult("
             f"found={self.found!r}, port_count={len(self.ports)}, "
             f"attempts={self.attempts}, responses={self.responses}, "
+            f"error_code={self.error_code!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class OcfResponder:
+    """One OCF responder at a host: its identity and advertised secure ports.
+
+    ``rt`` and ``di`` come from a plaintext ``/oic/d`` read and ``secure_ports``
+    from ``/oic/res``. ``di`` is the unauthenticated Device UUID, suitable for
+    choosing which responder to dial; it does not replace an authenticated
+    ``/oic/d.di`` check made after a DTLS handshake. ``error_code`` is set when
+    the identity read did not complete. The representation redacts ``di`` and the
+    device name, which can identify a specific unit.
+    """
+
+    plaintext_port: int
+    rt: tuple[str, ...]
+    di: str | None
+    name: str | None
+    secure_ports: tuple[int, ...]
+    error_code: str | None = None
+
+    @property
+    def has_identity(self) -> bool:
+        """Return whether a Device UUID was read for this responder."""
+        return self.di is not None
+
+    def __repr__(self) -> str:
+        return (
+            "OcfResponder("
+            f"plaintext_port={self.plaintext_port}, rt={list(self.rt)!r}, "
+            f"has_di={self.di is not None!r}, has_name={self.name is not None!r}, "
+            f"secure_port_count={len(self.secure_ports)}, "
+            f"error_code={self.error_code!r})"
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class OcfResponderDiscovery:
+    """Redacted result of enumerating the OCF responders at one host.
+
+    ``error_code`` carries the multicast discovery failure when no responder was
+    found; it is ``None`` once at least one responder is enumerated, even if an
+    individual responder's identity read failed (see ``OcfResponder.error_code``).
+    """
+
+    responders: tuple[OcfResponder, ...]
+    error_code: str | None = None
+
+    @property
+    def found(self) -> bool:
+        """Return whether at least one responder was enumerated."""
+        return bool(self.responders)
+
+    def __repr__(self) -> str:
+        return (
+            "OcfResponderDiscovery("
+            f"found={self.found!r}, responder_count={len(self.responders)}, "
             f"error_code={self.error_code!r})"
         )
 
@@ -325,3 +395,138 @@ def discover_ocf_responder_ports(
         except OSError:
             pass
         selector.close()
+
+
+def _validate_responder_port(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("port must be an integer")
+    if not 1 <= value <= 65535:
+        raise ValueError("port must be between 1 and 65535")
+    return value
+
+
+def _identity_from_oic_d(payload: bytes) -> tuple[tuple[str, ...], str | None, str | None]:
+    try:
+        value = cbor2.loads(payload)
+    except Exception:  # noqa: BLE001 - untrusted CBOR must fail closed
+        return (), None, None
+    if not isinstance(value, dict):
+        return (), None, None
+    rt_raw = value.get("rt")
+    rt = (
+        tuple(item for item in rt_raw if isinstance(item, str))
+        if isinstance(rt_raw, list)
+        else ()
+    )
+    di = value.get("di")
+    di = di if isinstance(di, str) and di else None
+    name = value.get("n")
+    name = name if isinstance(name, str) else None
+    return rt, di, name
+
+
+def read_ocf_responder(
+    host: str,
+    port: int,
+    *,
+    timeout: float = 3.0,
+    retries: int = 1,
+) -> OcfResponder:
+    """Read one responder's identity and advertised secure ports at a known port.
+
+    Two unicast reads run in sequence on ``host``:``port``: ``/oic/d`` for the
+    responder's ``rt``, ``di`` and name, then ``/oic/res`` for its advertised
+    secure ports. ``/oic/d`` is read at its default OCF Interface, which exposes
+    the ``rt``/``if`` Common Properties; a non-baseline view may omit them.
+
+    The ``di`` returned is the plaintext, unauthenticated Device UUID. It is for
+    choosing which responder to dial and does not replace an authenticated
+    ``/oic/d.di`` check made after a DTLS handshake. When the ``/oic/d`` read does
+    not complete, ``rt`` is empty, ``di``/``name`` are ``None``, and
+    ``error_code`` is set; the secure-port read is still attempted.
+    """
+
+    port = _validate_responder_port(port)
+    identity = read_plaintext_ocf_resource(
+        host, "/oic/d", port=port, timeout=timeout, retries=retries
+    )
+    if identity.successful:
+        rt, di, name = _identity_from_oic_d(identity.payload)
+        error_code = None
+    else:
+        rt, di, name = (), None, None
+        error_code = identity.error_code or "identity_unavailable"
+
+    secure = discover_ocf_secure_ports(
+        host, discovery_port=port, timeout=timeout, retries=retries
+    )
+    return OcfResponder(
+        plaintext_port=port,
+        rt=rt,
+        di=di,
+        name=name,
+        secure_ports=secure.ports,
+        error_code=error_code,
+    )
+
+
+def discover_ocf_responders(
+    target_address: str,
+    *,
+    interface_address: str,
+    discovery_port: int = _OCF_DISCOVERY_PORT,
+    timeout: float = 3.0,
+    rounds: int = 2,
+    per_read_timeout: float = 3.0,
+    retries: int = 1,
+) -> OcfResponderDiscovery:
+    """Enumerate the OCF responders at one IPv4 host, with identity and ports.
+
+    Multicast discovery first finds each responder's plaintext port; then, one
+    responder at a time, :func:`read_ocf_responder` reads its identity
+    (``/oic/d``) and advertised secure ports (``/oic/res``). Reads are sequential,
+    not parallel, so a host that answers discovery from several ports is not
+    flooded.
+
+    Choosing which responder is the wanted appliance is left to the caller: filter
+    :attr:`OcfResponder.rt` (an appliance declares a functional ``oic.d.*`` type
+    beyond the mandatory ``oic.wk.d``), or match a stored :attr:`OcfResponder.di`
+    with :func:`secure_ports_for_di`. When no responder answers, the result's
+    ``error_code`` carries the multicast discovery reason, which lets a caller
+    distinguish "nothing here" from "multicast could not cross the network".
+    """
+
+    discovery = discover_ocf_responder_ports(
+        target_address,
+        interface_address=interface_address,
+        discovery_port=discovery_port,
+        timeout=timeout,
+        rounds=rounds,
+    )
+    if not discovery.ports:
+        return OcfResponderDiscovery((), error_code=discovery.error_code)
+    responders = tuple(
+        read_ocf_responder(
+            target_address, port, timeout=per_read_timeout, retries=retries
+        )
+        for port in discovery.ports
+    )
+    return OcfResponderDiscovery(responders)
+
+
+def secure_ports_for_di(responders: object, di: str) -> tuple[int, ...]:
+    """Return the advertised secure ports of the responder whose ``di`` matches.
+
+    ``responders`` is any iterable of :class:`OcfResponder`, typically
+    ``discover_ocf_responders(...).responders``. ``di`` is the plaintext
+    ``/oic/d`` Device UUID stored at onboarding, which is stable across the
+    reboots that move the secure port. Returns an empty tuple when no responder
+    carries that ``di``.
+    """
+
+    if not isinstance(di, str) or not di:
+        raise ValueError("di must be a non-empty string")
+    for responder in responders:
+        if responder.di == di:
+            return responder.secure_ports
+    return ()

@@ -74,8 +74,13 @@ SUPPORTED_DOWNSTREAM_IMPORTS = {
         "read_plaintext_ocf_resource",
     ),
     "smartthings_local.protocol.ocf_multicast": (
+        "OcfResponder",
+        "OcfResponderDiscovery",
         "OcfResponderPortDiscoveryResult",
         "discover_ocf_responder_ports",
+        "discover_ocf_responders",
+        "read_ocf_responder",
+        "secure_ports_for_di",
     ),
     "smartthings_local.protocol.coap": (
         "ACCEPT",
