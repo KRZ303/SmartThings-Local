@@ -259,7 +259,14 @@ A compatible appliance accepts a client certificate whose Subject DN carries a U
 python setup_cert.py
 ```
 
-That writes `certs/client_fullchain.pem` and `certs/client.key`. Why it works and how durable it is are in [docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md). Whether a given appliance accepts this credential at all is in [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md).
+That writes `certs/client_fullchain.pem` and `certs/client.key`. Minting touches no appliance: the UUID is a constant and the key and leaf are made locally. To see what a device makes of the result, probe it:
+
+```sh
+python -m smartthings_local.protocol.dtls_probe <ip> <port> --diagnostic \
+    --cert certs/client_fullchain.pem --key certs/client.key
+```
+
+A refusal names itself there: `alert=unknown_ca` is the OCF-PKI wall ([#16](https://github.com/QuiteYellow/SmartThings-Local/issues/16)). A completed handshake is weaker evidence than it looks, since these appliances complete one with no client certificate at all; what proves the certificate authorized is an authenticated `GET /oic/sec/acl` returning `2.05`. Why it works and how durable it is are in [docs/certificates.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/certificates.md). Whether a given appliance accepts this credential at all is in [docs/appliance-compatibility.md](https://github.com/QuiteYellow/SmartThings-Local/blob/main/docs/appliance-compatibility.md).
 
 ### Credentials from memory
 
@@ -711,7 +718,7 @@ mqtt_demo/                           MQTT bridge demo (consumes smartthings_loca
   deploy.sh                          tar + ssh + docker compose up --build
   requirements.txt                   Python dependencies for the bridge
   .env.example                       Template — copy to .env, fill in
-setup_cert.py                        One-shot cert minting script (self-signed by default, --fallback signs with AC14K_M)
+setup_cert.py                        Offline cert minting script (self-signed by default, --fallback signs with AC14K_M)
 pyproject.toml                       Packaging — PyPI dist `smartthings-local`, hatch-vcs versioning
 tests/                               pytest suite (CoAP wire, state cache, import isolation, cert loading, DTLS probe, bridge port resolution, cert signing, certificate profiles, OwnerPSK derivation, connect deadline, session interruption)
 .github/workflows/publish.yml        Build + PyPI Trusted Publishing on `v*` tags

@@ -17,8 +17,10 @@ For a compatible firmware family, the bridge authenticates with a **client cert*
 
 ```sh
 pip install -r requirements-bootstrap.txt
-TARGET_IP=$APPLIANCE_IP python setup_cert.py --test
+python setup_cert.py
 ```
+
+Nothing in this reaches an appliance. The UUID is a constant, the key and leaf are minted locally by `openssl`, and the only network access is the `--fallback` bundle fetch. Checking the result against a device is a separate step, below.
 
 What it does:
 
@@ -26,7 +28,6 @@ What it does:
 2. Generates a fresh RSA-2048 key pair you own.
 3. Builds a CSR with the UUID in OU + CN + SAN.
 4. Signs the leaf with its own key, using SHA-256. There is no CA, so the fullchain PEM holds the one certificate.
-5. With `--test`: opens a DTLS handshake against `$TARGET_IP:$TARGET_PORT` (default `49154`) and GETs `/oic/sec/acl`; a `2.05` reply proves the cert authenticated (anonymous peers get `4.01`).
 
 With `--fallback`, step 4 becomes the pre-2026 recipe instead: fetch the AC14K_M signing CA, private key and upstream chain (RemoteAccessCA → CECA → ROOTCA) from a public mirror, check that the cert and key actually pair (modulus match), sign the leaf with `AC14K_M` using SHA-1 as the original recipe did, and concatenate `leaf + AC14K_M + 3 upstream CAs`.
 
@@ -35,6 +36,19 @@ Output in `./certs/`: `client_fullchain.pem` + `client.key`.
 The AC14K_M bundle is not in this repo. `--fallback` fetches it from a public mirror each run, and if that fetch fails the script prints the workaround: supply the bundle via `AC14K_M_CERT_BUNDLE=/path/to/cert.pem`, or point at another mirror with `BRAYSTORM_URL=<mirror>`.
 
 On Fedora/RHEL (and other hardened OpenSSL 3.x builds) the default crypto policy blocks SHA-1 signing, which `--fallback` needs. (The default path signs with SHA-256 and is unaffected.) The script detects this, retries the signing step once with SHA-1 force-enabled for just that command, and only fails if the retry also fails. If it does, it prints the remedy: `sudo update-crypto-policies --set DEFAULT:SHA1` (undo afterward with `sudo update-crypto-policies --set DEFAULT`).
+
+## Checking the cert against a device
+
+```sh
+python -m smartthings_local.protocol.dtls_probe <ip> <port> --diagnostic \
+    --cert certs/client_fullchain.pem --key certs/client.key
+```
+
+`--diagnostic` reports the server's own flight and any fatal alert, so a refusal names itself: `alert=unknown_ca` is the OCF-PKI wall ([#16](https://github.com/QuiteYellow/SmartThings-Local/issues/16)), while a bare `handshake_failure` with nothing ahead of it is something else.
+
+Find the port with `discover_ocf_secure_ports`. It is assigned by the appliance and differs between units, so there is no default worth guessing at; an earlier `--test` flag here defaulted to `49154` and reported a timeout on any appliance that had landed elsewhere.
+
+A completed handshake does not prove the certificate authorized, because these appliances complete one with no client certificate at all. What settles that is an authenticated read over a `DtlsCoapSession`: `GET /oic/sec/acl` returning `2.05`, where an anonymous peer gets `4.01`.
 
 ## How durable is this on the compatible firmware families?
 

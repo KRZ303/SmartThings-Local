@@ -18,8 +18,11 @@ Steps:
    `--fallback`, sign with the public AC14K_M intermediate instead (the
    pre-2026 path), for a device that does validate the chain.
 5. Assemble `client.key`, `client.pem`, `client_fullchain.pem`.
-6. With `--test`, DTLS-handshake to an appliance and GET
-   `/oic/sec/acl`; a 2.05 reply confirms the cert is accepted.
+
+Nothing here touches an appliance. The UUID is a constant, the key and
+the leaf are minted locally by `openssl`, and the only network access is
+the `--fallback` bundle fetch. To find out what a device makes of the
+result, see "Checking the cert against a device" below.
 
 Background:
 
@@ -40,9 +43,7 @@ Fallback if the --fallback bundle fetch fails:
 Usage:
 
     python setup_cert.py                 # self-signed (default)
-    python setup_cert.py --test
     python setup_cert.py --fallback      # AC14K_M-signed (pre-2026 path)
-    TARGET_IP=192.0.2.10 python setup_cert.py --test
 
 Env overrides (all optional; AC14K_M_* apply only with --fallback):
     AC14K_M_CERT         AC14K_M cert PEM (skip live fetch)
@@ -52,13 +53,26 @@ Env overrides (all optional; AC14K_M_* apply only with --fallback):
     BRAYSTORM_URL        bundle source URL
     UUID                 override CLIENT_UUID
     OUT_DIR              output dir (default ./certs/)
-    TARGET_IP            device IP for --test
-    TARGET_PORT          device port for --test (default 49154)
+
+Checking the cert against a device:
+
+    python -m smartthings_local.protocol.dtls_probe <ip> <port> --diagnostic \
+        --cert certs/client_fullchain.pem --key certs/client.key
+
+`--diagnostic` reports the server's own flight and any fatal alert, so a
+refusal names itself: `alert=unknown_ca` is the OCF-PKI wall (issue #16),
+a bare `handshake_failure` is something else. Find <port> with
+`discover_ocf_secure_ports`; it is assigned by the appliance and differs
+between units, so there is no default worth guessing at.
+
+A completed handshake is not proof the certificate authorized: these
+appliances complete one with no client certificate at all. What settles
+that is an authenticated read, `GET /oic/sec/acl` returning 2.05 rather
+than 4.01, over a `DtlsCoapSession`.
 """
 import argparse
 import os
 import re
-import socket
 import subprocess
 import sys
 import tempfile
@@ -330,99 +344,6 @@ DNS.1 = {uuid}
     return paths
 
 
-def test_handshake(target_ip, target_port, cert_path, key_path):
-    """DTLS-handshake to a device and GET /oic/sec/acl.
-    2.05 means the cert authenticated; 4.01 means it didn't."""
-    try:
-        from OpenSSL import SSL
-    except ImportError:
-        print("[!] pyOpenSSL not installed — skipping connectivity test")
-        print("    Install with: pip install pyOpenSSL")
-        return None
-
-    import time
-
-    ctx = SSL.Context(SSL.DTLS_METHOD)
-    ctx.set_verify(SSL.VERIFY_NONE, lambda *a: True)
-    ctx.set_cipher_list(b'ECDHE-ECDSA-AES128-GCM-SHA256:@SECLEVEL=0')
-    ctx.use_certificate_chain_file(str(cert_path))
-    ctx.use_privatekey_file(str(key_path))
-    ctx.check_privatekey()
-    conn = SSL.Connection(ctx, None)
-    conn.set_connect_state(); conn.set_ciphertext_mtu(1200)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(2)
-    dest = (target_ip, target_port)
-
-    def split_dtls(buf):
-        o, out = 0, []
-        while o + 13 <= len(buf):
-            L = int.from_bytes(buf[o+11:o+13], 'big'); end = o + 13 + L
-            if end > len(buf): break
-            out.append(buf[o:end]); o = end
-        return out
-
-    print(f"[+] DTLS handshake to {target_ip}:{target_port}...")
-    t0 = time.time()
-    handshake_ok = False
-    while time.time() - t0 < 12:
-        try:
-            conn.do_handshake(); handshake_ok = True; break
-        except SSL.WantReadError: pass
-        except SSL.Error as e:
-            print(f"    SSL error: {e}"); return False
-        try:
-            out = conn.bio_read(65535)
-            if out:
-                for r in split_dtls(out): sock.sendto(r, dest)
-        except SSL.WantReadError: pass
-        try:
-            data, _ = sock.recvfrom(65535)
-            if data: conn.bio_write(data)
-        except socket.timeout: pass
-        time.sleep(0.05)
-
-    if not handshake_ok:
-        print(f"    handshake TIMEOUT after {time.time()-t0:.1f}s")
-        sock.close(); return False
-    print(f"    handshake OK in {time.time()-t0:.2f}s")
-
-    msg = (
-        bytes([0x41, 0x01, 0xab, 0x00, 0xaa])
-        + bytes([0xb3]) + b'oic' + bytes([0x03]) + b'sec' + bytes([0x03]) + b'acl'
-        + bytes([0x61]) + b'\x3c'
-    )
-    conn.send(msg)
-    try:
-        while True:
-            out = conn.bio_read(65535)
-            if not out: break
-            sock.sendto(out, dest)
-    except SSL.WantReadError: pass
-
-    deadline = time.time() + 6
-    while time.time() < deadline:
-        try:
-            data, _ = sock.recvfrom(65535)
-            if data:
-                conn.bio_write(data)
-                try:
-                    pl = conn.recv(65535)
-                    code = pl[1]
-                    print(f"    GET /oic/sec/acl -> {code>>5}.{code&0x1F:02d}")
-                    if code == 0x45:
-                        print(f"    OK — cert accepted by the device ACL")
-                        sock.close(); return True
-                    else:
-                        print(f"    Unexpected response code")
-                        sock.close(); return False
-                except SSL.WantReadError: continue
-        except socket.timeout: pass
-        time.sleep(0.05)
-    print(f"    GET /oic/sec/acl TIMEOUT")
-    sock.close(); return False
-
-
 def resolve_ac14k_inputs(out_dir):
     """Return (ac14k_cert, ac14k_key, chain_files).
 
@@ -483,8 +404,6 @@ def main():
     p = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         description=__doc__)
-    p.add_argument('--test', action='store_true',
-                   help='After minting, attempt a DTLS handshake to TARGET_IP:TARGET_PORT')
     p.add_argument('--fallback', action='store_true',
                    help='Mint an AC14K_M-signed cert (the pre-2026 path) instead of '
                         'the default self-signed cert. Use only if a device rejects '
@@ -492,8 +411,6 @@ def main():
     args = p.parse_args()
 
     out_dir    = os.environ.get('OUT_DIR', './certs/')
-    target_ip  = os.environ.get('TARGET_IP')
-    target_port = int(os.environ.get('TARGET_PORT', 49154))
     uuid_override = os.environ.get('UUID')
 
     # Phase 1: identify the UUID. Both paths need it, and it is the only
@@ -562,20 +479,6 @@ def main():
 
     subj_out = run(['openssl', 'x509', '-in', str(paths['leaf']), '-noout', '-subject'])
     print(f"  Subject: {subj_out.stdout.strip().replace('subject=', '')}")
-
-    if args.test:
-        print()
-        print("=" * 60)
-        print("Phase 3: verify cert against target appliance")
-        print("=" * 60)
-        if not target_ip:
-            print("  [!] TARGET_IP not set; cannot run connectivity test", file=sys.stderr)
-        else:
-            result = test_handshake(target_ip, target_port, paths['fullchain'], paths['key'])
-            if result is True:
-                print("\n  Cert is functional. Drop fullchain.pem + key into your bridge config.")
-            elif result is False:
-                print("\n  Cert failed verification. Check target IP/port and try again.")
 
     print()
     print("=" * 60)
