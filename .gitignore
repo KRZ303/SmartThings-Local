@@ -27,6 +27,7 @@ uv.lock
 # Packaging / build artifacts
 /smartthings_local/_version.py
 /dist/
+smartthings_local/protocol/_mbedtls_native.so
 *.egg-info/
 
 # Bridge runtime

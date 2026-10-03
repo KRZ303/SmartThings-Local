@@ -254,7 +254,7 @@ def test_psk_auth_is_a_public_authentication_provider():
     )
 
 
-def test_psk_identity_validation_is_reachable_without_a_key():
+def test_psk_identity_validation_is_reachable_without_a_key(monkeypatch):
     # An import flow validates a stored identity before it has a key to pair
     # with it, so this is part of the supported surface rather than an
     # internal guard.
@@ -262,6 +262,10 @@ def test_psk_identity_validation_is_reachable_without_a_key():
     assert list(parameters) == ["identity"]
     assert PskAuth.validate_identity(b"i" * 16) is None
 
+    from smartthings_local.protocol import _mbedtls
+    def unavailable():
+        raise ValueError("Mbed TLS unavailable")
+    monkeypatch.setattr(_mbedtls, '_load_library', unavailable)
     with pytest.raises(ValueError):
         PskAuth.validate_identity(b"i" * 15 + b"\x00")
 

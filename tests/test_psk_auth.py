@@ -84,40 +84,43 @@ def test_psk_auth_rejects_invalid_identity_lengths(identity_length):
         PskAuth(identity=b"i" * identity_length, key=_KEY)
 
 
-def test_psk_auth_rejects_identity_with_nul_byte():
-    with pytest.raises(ValueError, match="cannot contain a NUL"):
+def test_psk_auth_rejects_identity_with_nul_without_backend(monkeypatch):
+    from smartthings_local.protocol import _mbedtls
+    monkeypatch.setattr(_mbedtls.ctypes, "CDLL", lambda *_: (_ for _ in ()).throw(OSError()))
+    _mbedtls._load_library.cache_clear()
+    with pytest.raises(ValueError, match="Mbed TLS"):
         PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
 
 
-def test_nul_rejection_explains_the_truncation_it_prevents():
-    # Measured against OpenSSL 4.0.0: a 16-byte identity with a NUL at byte 8
-    # goes on the wire as 8 bytes and the handshake raises nothing locally, so
-    # the guard is the only thing standing between a caller and a silently
-    # wrong identity. The message has to carry that, because an appliance
-    # answers the truncated value with unknown_psk_identity and nothing else
-    # points back here.
+def test_nul_rejection_explains_the_missing_backend(monkeypatch):
+    from smartthings_local.protocol import _mbedtls
+    monkeypatch.setattr(_mbedtls.ctypes, "CDLL", lambda *_: (_ for _ in ()).throw(OSError()))
+    _mbedtls._load_library.cache_clear()
     with pytest.raises(ValueError) as raised:
         PskAuth(identity=b"i" * 15 + b"\x00", key=_KEY)
 
     message = str(raised.value)
-    assert "C string" in message
-    assert "truncates" in message
-    assert "shorter identity" in message
+    assert "NUL byte" in message
+    assert "Mbed TLS" in message
+    assert "_build_mbedtls" in message
 
 
-def test_validate_identity_checks_a_credential_before_one_is_assembled():
+def test_validate_identity_checks_a_credential_before_one_is_assembled(monkeypatch):
     # An import flow holds an identity before it has a provider to build, and
     # needs the reason to show a user, so the check is reachable on its own
     # and raises what the constructor raises.
     assert PskAuth.validate_identity(_IDENTITY) is None
 
-    with pytest.raises(ValueError, match="cannot contain a NUL"):
+    from smartthings_local.protocol import _mbedtls
+    monkeypatch.setattr(_mbedtls.ctypes, "CDLL", lambda *_: (_ for _ in ()).throw(OSError()))
+    _mbedtls._load_library.cache_clear()
+    with pytest.raises(ValueError, match="Mbed TLS"):
         PskAuth.validate_identity(b"i" * 15 + b"\x00")
 
 
 @pytest.mark.parametrize(
     "identity",
-    [b"i" * 15 + b"\x00", b"i" * 15, b"i" * 17, b""],
+    [b"i" * 15, b"i" * 17, b""],
 )
 def test_validate_identity_rejects_what_the_constructor_rejects(identity):
     # One code path, so the reason a caller can show a user is the same
@@ -527,7 +530,7 @@ def test_openssl_sends_a_clean_identity_whole():
     assert wire == identity
 
 
-def test_a_nul_identity_would_reach_the_wire_truncated():
+def test_a_nul_identity_would_reach_the_openssl_wire_truncated():
     # The reason PskAuth refuses this rather than passing it through.
     # OpenSSL's DTLS 1.2 PSK client callback returns the identity as a
     # C string and takes its strlen, so everything from the NUL onward is
@@ -543,6 +546,3 @@ def test_a_nul_identity_would_reach_the_wire_truncated():
 
     assert declared == 8
     assert wire == identity[:8]
-
-    with pytest.raises(ValueError, match="cannot contain a NUL"):
-        PskAuth(identity=identity, key=_KEY)

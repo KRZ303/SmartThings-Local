@@ -780,17 +780,19 @@ def diagnose_dtls_handshake(
     _validate_diagnostic_auth(auth, cert_pem, key_pem, cert_path, key_path)
     result = ProbeResult(host, port)
 
-    ctx = _diagnostic_context(
-        auth=auth,
-        cert_pem=cert_pem,
-        key_pem=key_pem,
-        cert_path=cert_path,
-        key_path=key_path,
-    )
-
-    conn = SSL.Connection(ctx, None)
-    conn.set_connect_state()
-    conn.set_ciphertext_mtu(mtu)
+    if isinstance(auth, PskAuth) and auth._mbedtls_factory is not None:
+        conn = auth._mbedtls_factory(mtu)
+    else:
+        ctx = _diagnostic_context(
+            auth=auth,
+            cert_pem=cert_pem,
+            key_pem=key_pem,
+            cert_path=cert_path,
+            key_path=key_path,
+        )
+        conn = SSL.Connection(ctx, None)
+        conn.set_connect_state()
+        conn.set_ciphertext_mtu(mtu)
 
     try:
         sock, _endpoint = open_host_filtered_udp_socket(
@@ -843,6 +845,7 @@ def diagnose_dtls_handshake(
                 if level == 2:  # fatal
                     result.outcome = REJECTED
 
+    completed = False
     try:
         completed = _drive_dtls_handshake(
             conn,
@@ -862,6 +865,9 @@ def diagnose_dtls_handshake(
     except OSError:
         result.error = ProbeError()
     finally:
+        if completed and isinstance(auth, PskAuth) and auth._mbedtls_factory is not None:
+            from .dtls_session import DtlsCoapSession
+            DtlsCoapSession._send_close_notify(conn, sock)
         sock.close()
 
     return result

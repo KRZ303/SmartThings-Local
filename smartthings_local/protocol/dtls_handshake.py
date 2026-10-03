@@ -199,9 +199,10 @@ def _drive_dtls_handshake(
     """
     retransmits = 0
     while time.monotonic() < deadline:
+        completed = False
         try:
             connection.do_handshake()
-            return True
+            completed = True
         except SSL.WantReadError:
             pass
 
@@ -215,6 +216,9 @@ def _drive_dtls_handshake(
                     raise OSError("incomplete UDP send")
                 if on_record_sent is not None:
                     on_record_sent(record)
+
+        if completed:
+            return True
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:

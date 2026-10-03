@@ -837,9 +837,13 @@ def test_cli_refuses_a_certificate_and_a_psk_together(capsys):
     assert 'not both' in capsys.readouterr().out
 
 
-def test_cli_reports_an_unusable_psk_credential_without_a_traceback(capsys):
+def test_cli_reports_an_unusable_psk_credential_without_a_traceback(capsys, monkeypatch):
     # A NUL in the identity is rejected by PskAuth, and the CLI has to render
     # that as a usage error rather than an exception.
+    from smartthings_local.protocol import _mbedtls
+    def unavailable():
+        raise ValueError("Mbed TLS unavailable")
+    monkeypatch.setattr(_mbedtls, '_load_library', unavailable)
     result = p._main([
         '127.0.0.1', '5684', '--diagnostic',
         '--psk-identity', '0102030405060708000a0b0c0d0e0f10',

@@ -56,6 +56,7 @@ from . import coap as _coap
 from .auth import (
     AuthenticationProvider,
     CertificateAuth,
+    PskAuth,
     SamsungServerProfile,
     ServerCertificateAuth,
 )
@@ -96,6 +97,7 @@ from .dtls_handshake import (
     _drive_dtls_handshake,
     _HandshakeCancelled,
 )
+from ._mbedtls import _MbedConnection
 from .endpoint import open_host_filtered_udp_socket
 
 # Private compatibility exports used by dtls_probe and existing callers.
@@ -773,15 +775,22 @@ class DtlsCoapSession:
                 (cancel is not None and cancel.is_set()):
             raise SessionClosedError()
         deadline = time.monotonic() + handshake_timeout
-        ctx = SSL.Context(SSL.DTLS_METHOD)
-        self.auth.configure_context(ctx)
+        mbedtls_factory = getattr(self.auth, '_mbedtls_factory', None)
+        if isinstance(self.auth, PskAuth) and mbedtls_factory is not None:
+            conn = mbedtls_factory(self.mtu)
+        else:
+            ctx = SSL.Context(SSL.DTLS_METHOD)
+            self.auth.configure_context(ctx)
+            if self._lifecycle_cancel.is_set() or \
+                    (cancel is not None and cancel.is_set()):
+                raise SessionClosedError()
+            conn = SSL.Connection(ctx, None)
+            conn.set_connect_state()
+            conn.set_ciphertext_mtu(self.mtu)
         if self._lifecycle_cancel.is_set() or \
                 (cancel is not None and cancel.is_set()):
             raise SessionClosedError()
 
-        conn = SSL.Connection(ctx, None)
-        conn.set_connect_state()
-        conn.set_ciphertext_mtu(self.mtu)
         if self._lifecycle_cancel.is_set() or \
                 (cancel is not None and cancel.is_set()):
             raise SessionClosedError()
@@ -1388,6 +1397,15 @@ class DtlsCoapSession:
                         if not pl:
                             break
                         packets.append(pl)
+                    if isinstance(conn, _MbedConnection):
+                        # Reading may enqueue a retransmitted final flight or alert.
+                        try:
+                            outbound = conn.bio_read(65535)
+                        except SSL.WantReadError:
+                            outbound = b''
+                        for record in _split_dtls(outbound):
+                            if sock.send(record) != len(record):
+                                raise OSError('incomplete UDP send')
                 for pl in packets:
                     try:
                         self._dispatch_coap(pl)
